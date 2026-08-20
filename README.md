@@ -19,7 +19,8 @@ This guide is written so that **anyone**, even a complete beginner, can set it u
 4. [Step 2: Set Up the Frontend](#-step-2-set-up-the-frontend)
 5. [Step 3: Run the App](#-step-3-run-the-app)
 6. [Environment Variables Explained](#-environment-variables-explained)
-7. [Troubleshooting](#-troubleshooting)
+7. [Architecture & How It Works (Deep Dive)](#-architecture--how-it-works-deep-dive)
+8. [Troubleshooting](#-troubleshooting)
 
 ---
 
@@ -156,6 +157,79 @@ These are small settings files that hold your private keys and configuration. Ne
 | `PORT` | `Backend/.env` | The port the backend server runs on (default: `8000`) |
 | `MONGO_URI` | `Backend/.env` | Your MongoDB database connection link |
 | `GEMINI_API_KEY` | Both `Backend/.env` **and** `project frontend/.env.local` | Your Google Gemini API key, needed for AI features |
+
+---
+
+## 🏗️ Architecture & How It Works (Deep Dive)
+
+This section is for anyone who wants to understand *how the codebase is actually built* — useful for contributors or anyone extending the project.
+
+### 1. Overall Layout
+
+The repository is split into two independent top-level components:
+
+| Component | Location | Technology |
+|-----------|----------|------------|
+| **Backend API** | `Backend/` | Node.js / Express (JavaScript) |
+| **Frontend UI** | `project frontend/` | React (JSX) built with Vite |
+
+Both parts communicate over HTTP — the frontend uses the Axios instance in `project frontend/src/api/axiosInstance.js` to call the Express routes.
+
+### 2. Backend Side
+
+| Layer | Files (representative) | Role |
+|-------|-------------------------|------|
+| **Entry point** | `src/app.js`, `src/index.js` | Creates the Express app, loads environment variables, and starts the server |
+| **Routing** | `src/routes/gemini.routes.js`, `src/routes/user.routes.js` | Define URL paths and map them to controller functions |
+| **Controllers** | `src/controllers/geminiController.js`, `userController.js`, `userCourseController.js`, `userProgressController.js` | Contain business logic. `geminiController.js` builds the prompt that generates a structured study-plan JSON and sends it to the Gemini AI model |
+| **Models** | `src/models/courses.model.js`, `question.model.js`, `user.model.js`, `userProgress.model.js` | Mongoose-style schemas for persisting courses, questions, users, and progress |
+| **Database connection** | `src/db/index.js` | Sets up the MongoDB connection (used by the Mongoose models) |
+| **Middleware** | `src/middlewares/auth.middleware.js`, `multer.middleware.js` | Authentication (JWT) and file-upload handling for protected routes |
+| **Utilities** | `src/utils/ApiError.js`, `ApiResponse.js`, `asyncHandler.js`, `cloudinary.js`, `sendEmail.js` | Standardised error/response handling, async wrapper, Cloudinary integration, email sending |
+| **AI integration** | `src/controllers/geminiController.js` (prompt) + `src/lib/gemini.js` (JSON-schema comment) | The controller sends a strict-JSON-only prompt to the Gemini model; the schema in `gemini.js` describes the expected output (`topic`, `subTopics`, `prerequisites`) |
+
+**Backend data flow:**
+1. HTTP request → Express route → controller.
+2. Controller may query/update MongoDB via the models, call the Gemini AI model (using the prompt in `geminiController.js`), and return a JSON response wrapped by `ApiResponse`.
+3. Middleware runs before the controller for auth or file handling.
+
+### 3. Frontend Side
+
+| Layer | Files (representative) | Role |
+|-------|-------------------------|------|
+| **Bootstrap** | `src/main.jsx`, `src/App.jsx` | Render the root React component and set up client-side routing |
+| **Routing & protection** | `components/ProtectedRoute.jsx` | Guards UI routes based on authentication state |
+| **State management** | `context/UserContext.js` | Provides global user/auth information via React Context |
+| **API layer** | `api/axiosInstance.js` | Configured Axios instance used by UI pages to call backend endpoints |
+| **UI components** | `components/ui/Button.jsx`, `Card.jsx`, `Input.jsx`, `ProgressBar.jsx`, `Layout.jsx`, `AIChat.jsx` | Reusable visual building blocks |
+| **Domain components** | `components/shared/AuthWrapper.jsx`, `CourseCard.jsx`, `StatCard.jsx` | Specific to the learning platform (e.g., displaying a course) |
+| **Pages (routes)** | `pages/Dashboard.jsx`, `GoalInput.jsx`, `CourseDetail.jsx`, `Quiz.jsx`, `QuizTopicSelection.jsx`, `LearningEngine.jsx`, `Result.jsx`, etc. | Represent the main screens the user navigates to |
+| **Static data** | `constants.js` (`MOCK_COURSES`) | Provides mock course objects (id, title, description, instructor, thumbnail, progress, category, difficulty) |
+| **AI-related lib** | `lib/gemini.js` (JSON-schema comment) | Documents the expected Gemini response format used by the backend |
+| **Utility helpers** | `lib/utils.js` | Generic client-side helper functions |
+
+**Frontend data flow:**
+1. User interacts with a page (e.g., selects a goal in `GoalInput.jsx`).
+2. The page calls the backend via the Axios instance (e.g., a Gemini route).
+3. The response (JSON study plan or learning report) is stored in component state or context and rendered using UI components (`CourseCard`, `StatCard`, etc.).
+4. Authentication state is kept in `UserContext`; `ProtectedRoute` checks this before rendering protected pages.
+
+### 4. Interaction Between Backend and Frontend
+
+1. **Authentication** – Frontend stores the JWT (provided by a login endpoint) in `UserContext`; `auth.middleware.js` validates it on protected backend routes.
+2. **Study-plan generation** – Frontend sends a learning goal to a Gemini endpoint; the backend's `geminiController.js` builds the prompt and returns strict JSON.
+3. **Quiz flow** – Frontend pages (`QuizTopicSelection.jsx`, `Quiz.jsx`) present questions; after completion, the score is posted to a backend route, which may again invoke Gemini to produce a personalized report.
+4. **Data persistence** – User progress, courses, and questions are stored in MongoDB via the model files.
+
+### 5. Key Design Characteristics
+
+- **Separation of concerns** – MVC-style backend (models ↔ controllers ↔ routes) plus a distinct React frontend.
+- **Modular utilities** – Centralised error handling (`ApiError`, `ApiResponse`), async wrapper, Cloudinary/email helpers make the backend extensible.
+- **AI integration as a service** – Gemini prompt and strict JSON schema are isolated in `geminiController.js` and `lib/gemini.js`, allowing the rest of the system to treat the AI output as a regular JSON API response.
+- **Stateless REST API** – All client-server communication occurs via JSON over HTTP; the frontend does not share server-side state beyond the JWT.
+- **Mock data for rapid UI development** – `MOCK_COURSES` enables the UI to be built and demonstrated without needing a fully seeded database.
+
+> **In summary:** the system consists of a Node/Express API that handles authentication, data persistence (MongoDB), and Gemini-driven study-plan/report generation, plus a React/Vite client that consumes this API, manages user state, and renders the learning experience through reusable components and page-level views. The two parts interact through well-defined JSON endpoints, keeping the architecture clean, modular, and extensible.
 
 ---
 
